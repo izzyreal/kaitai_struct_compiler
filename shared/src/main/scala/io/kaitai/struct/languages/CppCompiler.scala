@@ -186,6 +186,12 @@ class CppCompiler(
     // Parent type might be declared somewhere else - in this case we need to include it
     importDataType(parentType)
 
+    if (config.readWrite) {
+      ensureMode(PrivateAccess)
+      outHdr.puts("bool m__dirty;")
+      ensureMode(PublicAccess)
+    }
+
     outHdr.puts
     outHdr.puts(s"$classNameBrief($paramsArg" +
       s"$tIo $pIo, " +
@@ -220,6 +226,10 @@ class CppCompiler(
 
     // Store parameters passed to us
     params.foreach((p) => handleAssignmentSimple(p.id, paramName(p.id)))
+
+    if (config.readWrite) {
+      outSrc.puts("m__dirty = false;")
+    }
   }
 
   override def classConstructorFooter: Unit = {
@@ -310,6 +320,9 @@ class CppCompiler(
   }
 
   override def readFooter(): Unit = {
+    if (config.readWrite) {
+      outSrc.puts("m__dirty = false;")
+    }
     outSrc.dec
     outSrc.puts("}")
   }
@@ -337,6 +350,101 @@ class CppCompiler(
     ensureMode(PublicAccess)
     val ret = nonOwningPointer(privateMemberName(attrName), attrType)
     outHdr.puts(s"${kaitaiType2NativeType(attrType.asNonOwning())} ${publicMemberName(attrName)}() const { return $ret; }")
+  }
+
+  override def attributeSetter(attrName: Identifier, attrType: DataType, isNullable: Boolean): Unit = {
+    ensureMode(PublicAccess)
+    val setDirty = if (isStreamType(attrType)) "" else "m__dirty = true; "
+    outHdr.puts(s"void set_${idToStr(attrName)}(${kaitaiType2NativeType(attrType)} _v) { $setDirty${privateMemberName(attrName)} = ${stdMoveWrap("_v")}; }")
+  }
+
+  override def writeHeader(endian: Option[FixedEndian], isEmpty: Boolean): Unit = {
+    val suffix = endian match {
+      case Some(e) => s"_${e.toSuffix}"
+      case None => ""
+    }
+
+    ensureMode(endian match {
+      case Some(_) => PrivateAccess
+      case None => PublicAccess
+    })
+
+    outHdr.puts(s"void _write$suffix();")
+    outSrc.puts
+    outSrc.puts(s"void ${types2class(typeProvider.nowClass.name)}::_write$suffix() {")
+    outSrc.inc
+  }
+
+  override def writeFooter(): Unit = {
+    outSrc.puts("m__dirty = false;")
+    outSrc.dec
+    outSrc.puts("}")
+  }
+
+  override def runWriteCalc(): Unit = {
+    outSrc.puts("if (m__is_le == -1) {")
+    outSrc.inc
+    importListSrc.addKaitai("kaitai/exceptions.h")
+    outSrc.puts(s"throw ${ksErrorName(UndecidedEndiannessError)}" +
+      "(\"" + typeProvider.nowClass.path.mkString("/", "/", "") + "\");")
+    outSrc.dec
+    outSrc.puts("} else if (m__is_le == 1) {")
+    outSrc.inc
+    outSrc.puts("_write_le();")
+    outSrc.dec
+    outSrc.puts("} else {")
+    outSrc.inc
+    outSrc.puts("_write_be();")
+    outSrc.dec
+    outSrc.puts("}")
+  }
+
+  override def checkHeader(): Unit = {
+    ensureMode(PublicAccess)
+    outHdr.puts("void _check();")
+    outSrc.puts
+    outSrc.puts(s"void ${types2class(typeProvider.nowClass.name)}::_check() {")
+    outSrc.inc
+  }
+
+  override def checkFooter(): Unit = {
+    outSrc.puts("m__dirty = false;")
+    outSrc.dec
+    outSrc.puts("}")
+  }
+
+  override def attrWrite(attr: AttrLikeSpec, id: Identifier, defEndian: Option[Endianness]): Unit = {
+    if (attr.cond.ifExpr.nonEmpty || attr.cond.repeat != NoRepeat || attr.valid.nonEmpty) {
+      throw new NotImplementedError(s"C++ read-write prototype does not support conditional, repeated, or validated fields yet: ${attr.path.mkString("/")}")
+    }
+
+    val fixedEndian = defEndian match {
+      case Some(fe: FixedEndian) => Some(fe)
+      case None => None
+      case _ => None
+    }
+
+    attr.dataType match {
+      case rt: ReadableType =>
+        outSrc.puts(s"${normalIO}->write_${rt.apiCall(fixedEndian)}(${privateMemberName(id)});")
+      case et: EnumType =>
+        et.basedOn match {
+          case rt: ReadableType =>
+            outSrc.puts(s"${normalIO}->write_${rt.apiCall(fixedEndian)}(static_cast<${kaitaiType2NativeType(et.basedOn)}>(${privateMemberName(id)}));")
+          case _ =>
+            throw new NotImplementedError(s"C++ read-write prototype does not support enum base type `${et.basedOn}` yet: ${attr.path.mkString("/")}")
+        }
+      case _: BytesType =>
+        outSrc.puts(s"${normalIO}->write_bytes(${privateMemberName(id)});")
+      case _ =>
+        throw new NotImplementedError(s"C++ read-write prototype does not support field type `${attr.dataType}` yet: ${attr.path.mkString("/")}")
+    }
+  }
+
+  override def attrCheck(attr: AttrLikeSpec, id: Identifier): Unit = {
+    if (attr.cond.ifExpr.nonEmpty || attr.cond.repeat != NoRepeat || attr.valid.nonEmpty) {
+      throw new NotImplementedError(s"C++ read-write prototype does not support conditional, repeated, or validated fields yet: ${attr.path.mkString("/")}")
+    }
   }
 
   override def universalDoc(doc: DocSpec): Unit = {
@@ -407,6 +515,14 @@ class CppCompiler(
     }
     combinedType match {
       case _: UserType | _: ArrayTypeInStream | KaitaiStructType | AnyType | OwnedKaitaiStreamType => true
+      case _ => false
+    }
+  }
+
+  def isStreamType(t: DataType): Boolean = {
+    t match {
+      case at: ArrayType => isStreamType(at.elType)
+      case KaitaiStreamType | OwnedKaitaiStreamType => true
       case _ => false
     }
   }

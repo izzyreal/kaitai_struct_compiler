@@ -355,7 +355,8 @@ class CppCompiler(
   override def attributeSetter(attrName: Identifier, attrType: DataType, isNullable: Boolean): Unit = {
     ensureMode(PublicAccess)
     val setDirty = if (isStreamType(attrType)) "" else "m__dirty = true; "
-    outHdr.puts(s"void set_${idToStr(attrName)}(${kaitaiType2NativeType(attrType)} _v) { $setDirty${privateMemberName(attrName)} = ${stdMoveWrap("_v")}; }")
+    val clearNull = if (isNullable && !needsDestruction(attrType)) s"${nullFlagForName(attrName)} = false; " else ""
+    outHdr.puts(s"void set_${idToStr(attrName)}(${kaitaiType2NativeType(attrType)} _v) { $setDirty$clearNull${privateMemberName(attrName)} = ${stdMoveWrap("_v")}; }")
   }
 
   override def writeHeader(endian: Option[FixedEndian], isEmpty: Boolean): Unit = {
@@ -414,8 +415,17 @@ class CppCompiler(
   }
 
   override def attrWrite(attr: AttrLikeSpec, id: Identifier, defEndian: Option[Endianness]): Unit = {
-    if (attr.cond.ifExpr.nonEmpty || attr.cond.repeat != NoRepeat || attr.valid.nonEmpty) {
-      throw new NotImplementedError(s"C++ read-write prototype does not support conditional, repeated, or validated fields yet: ${attr.path.mkString("/")}")
+    attr.cond.repeat match {
+      case RepeatExpr(repeatExpr) =>
+        attrWriteRepeatExpr(attr, id, repeatExpr, defEndian)
+        return
+      case repUntil: RepeatUntil =>
+        attrWriteRepeatUntil(attr, id, repUntil, defEndian)
+        return
+      case RepeatEos =>
+        attrWriteRepeatEos(attr, id, defEndian)
+        return
+      case NoRepeat =>
     }
 
     val fixedEndian = defEndian match {
@@ -424,27 +434,325 @@ class CppCompiler(
       case _ => None
     }
 
-    attr.dataType match {
-      case rt: ReadableType =>
-        outSrc.puts(s"${normalIO}->write_${rt.apiCall(fixedEndian)}(${privateMemberName(id)});")
-      case et: EnumType =>
-        et.basedOn match {
-          case rt: ReadableType =>
-            outSrc.puts(s"${normalIO}->write_${rt.apiCall(fixedEndian)}(static_cast<${kaitaiType2NativeType(et.basedOn)}>(${privateMemberName(id)}));")
-          case _ =>
-            throw new NotImplementedError(s"C++ read-write prototype does not support enum base type `${et.basedOn}` yet: ${attr.path.mkString("/")}")
-        }
-      case _: BytesType =>
-        outSrc.puts(s"${normalIO}->write_bytes(${privateMemberName(id)});")
-      case _ =>
-        throw new NotImplementedError(s"C++ read-write prototype does not support field type `${attr.dataType}` yet: ${attr.path.mkString("/")}")
+    attr.cond.ifExpr match {
+      case Some(ifExpr) =>
+        outSrc.puts(s"if (${expression(ifExpr)}) {")
+        outSrc.inc
+        emitWriteExpr(attr, attr.dataType, privateMemberName(id), fixedEndian)
+        outSrc.dec
+        outSrc.puts("}")
+      case None =>
+        emitWriteExpr(attr, attr.dataType, privateMemberName(id), fixedEndian)
     }
   }
 
   override def attrCheck(attr: AttrLikeSpec, id: Identifier): Unit = {
-    if (attr.cond.ifExpr.nonEmpty || attr.cond.repeat != NoRepeat || attr.valid.nonEmpty) {
-      throw new NotImplementedError(s"C++ read-write prototype does not support conditional, repeated, or validated fields yet: ${attr.path.mkString("/")}")
+    attr.cond.repeat match {
+      case RepeatExpr(repeatExpr) =>
+        attrCheckRepeatExpr(attr, id, repeatExpr)
+        return
+      case repUntil: RepeatUntil =>
+        attrCheckRepeatUntil(attr, id, repUntil)
+        return
+      case RepeatEos =>
+        attrCheckRepeatEos(attr, id)
+        return
+      case NoRepeat =>
     }
+
+    attr.cond.ifExpr match {
+      case Some(ifExpr) =>
+        val isSetExpr = attrIsSetExpr(id, attr.dataType)
+        importListSrc.addSystem("stdexcept")
+        outSrc.puts(s"if (${expression(ifExpr)}) {")
+        outSrc.inc
+        outSrc.puts(s"if (!($isSetExpr)) {")
+        outSrc.inc
+        outSrc.puts(s"""throw std::runtime_error("${attr.path.mkString("/", "/", "")}: conditional field is not set");""")
+        outSrc.dec
+        outSrc.puts("}")
+        emitCheckExpr(attr, attr.dataType, privateMemberName(id))
+        attr.valid.foreach(valid => attrValidate(attr, valid, true))
+        outSrc.dec
+        outSrc.puts("} else {")
+        outSrc.inc
+        outSrc.puts(s"if ($isSetExpr) {")
+        outSrc.inc
+        outSrc.puts(s"""throw std::runtime_error("${attr.path.mkString("/", "/", "")}: conditional field should be absent");""")
+        outSrc.dec
+        outSrc.puts("}")
+        outSrc.dec
+        outSrc.puts("}")
+        return
+      case None =>
+    }
+
+    attr.dataType match {
+      case _ =>
+    }
+
+    emitCheckExpr(attr, attr.dataType, privateMemberName(id))
+    attr.valid.foreach(valid => attrValidate(attr, valid, true))
+  }
+
+  private def attrAssertUserTypePresent(attr: AttrLikeSpec, id: Identifier, expr: String): Unit = {
+    importListSrc.addSystem("stdexcept")
+    outSrc.puts(s"if ($expr == $nullPtr) {")
+    outSrc.inc
+    outSrc.puts(s"""throw std::runtime_error("${attr.path.mkString("/", "/", "")}: nested object is not set");""")
+    outSrc.dec
+    outSrc.puts("}")
+  }
+
+  private def attrAssertRepeatFieldPresent(attr: AttrLikeSpec, id: Identifier): Unit = {
+    importListSrc.addSystem("stdexcept")
+    outSrc.puts(s"if (${privateMemberName(id)} == $nullPtr) {")
+    outSrc.inc
+    outSrc.puts(s"""throw std::runtime_error("${attr.path.mkString("/", "/", "")}: repeated field is not set");""")
+    outSrc.dec
+    outSrc.puts("}")
+  }
+
+  private def attrWriteRepeatExpr(attr: AttrLikeSpec, id: Identifier, repeatExpr: Ast.expr, defEndian: Option[Endianness]): Unit = {
+    if (attr.valid.nonEmpty) {
+      throw new NotImplementedError(s"C++ read-write prototype does not support validations on repeated fields yet: ${attr.path.mkString("/")}")
+    }
+
+    val fixedEndian = defEndian match {
+      case Some(fe: FixedEndian) => Some(fe)
+      case None => None
+      case _ => None
+    }
+    val vecType = s"std::vector<${kaitaiType2NativeType(attr.dataType)}>"
+    val itemExpr = "(*it)"
+
+    attrAssertRepeatFieldPresent(attr, id)
+    outSrc.puts(s"for ($vecType::const_iterator it = ${privateMemberName(id)}->begin(); it != ${privateMemberName(id)}->end(); ++it) {")
+    outSrc.inc
+    emitWriteExpr(attr, attr.dataType, itemExpr, fixedEndian)
+    outSrc.dec
+    outSrc.puts("}")
+  }
+
+  private def attrCheckRepeatExpr(attr: AttrLikeSpec, id: Identifier, repeatExpr: Ast.expr): Unit = {
+    if (attr.valid.nonEmpty) {
+      throw new NotImplementedError(s"C++ read-write prototype does not support validations on repeated fields yet: ${attr.path.mkString("/")}")
+    }
+
+    attrAssertRepeatFieldPresent(attr, id)
+    outSrc.puts(s"if (${privateMemberName(id)}->size() != static_cast<std::size_t>(${expression(repeatExpr)})) {")
+    outSrc.inc
+    outSrc.puts(s"""throw std::runtime_error("${attr.path.mkString("/", "/", "")}: repeat-expr size mismatch");""")
+    outSrc.dec
+    outSrc.puts("}")
+
+    val vecType = s"std::vector<${kaitaiType2NativeType(attr.dataType)}>"
+    outSrc.puts(s"for ($vecType::const_iterator it = ${privateMemberName(id)}->begin(); it != ${privateMemberName(id)}->end(); ++it) {")
+    outSrc.inc
+    emitCheckExpr(attr, attr.dataType, "(*it)")
+    outSrc.dec
+    outSrc.puts("}")
+  }
+
+  private def attrWriteRepeatUntil(attr: AttrLikeSpec, id: Identifier, repUntil: RepeatUntil, defEndian: Option[Endianness]): Unit = {
+    if (attr.valid.nonEmpty) {
+      throw new NotImplementedError(s"C++ read-write prototype does not support validations on repeated fields yet: ${attr.path.mkString("/")}")
+    }
+
+    val fixedEndian = defEndian match {
+      case Some(fe: FixedEndian) => Some(fe)
+      case None => None
+      case _ => None
+    }
+
+    emitWriteRepeatLoop(attr, id, fixedEndian)
+  }
+
+  private def attrCheckRepeatUntil(attr: AttrLikeSpec, id: Identifier, repUntil: RepeatUntil): Unit = {
+    if (attr.valid.nonEmpty) {
+      throw new NotImplementedError(s"C++ read-write prototype does not support validations on repeated fields yet: ${attr.path.mkString("/")}")
+    }
+
+    attrAssertRepeatFieldPresent(attr, id)
+    importListSrc.addSystem("stdexcept")
+    importListSrc.addSystem("cstddef")
+    outSrc.puts(s"if (${privateMemberName(id)}->empty()) {")
+    outSrc.inc
+    outSrc.puts(s"""throw std::runtime_error("${attr.path.mkString("/", "/", "")}: repeat-until field must not be empty");""")
+    outSrc.dec
+    outSrc.puts("}")
+
+    emitCheckRepeatLoop(attr, id) {
+      outSrc.puts(s"const bool _is_last = (i == ${privateMemberName(id)}->size() - 1);")
+      outSrc.puts(s"if ((${repeatUntilExpr(id, attr.dataType, repUntil)}) != _is_last) {")
+      outSrc.inc
+      outSrc.puts(s"""throw std::runtime_error("${attr.path.mkString("/", "/", "")}: repeat-until condition mismatch");""")
+      outSrc.dec
+      outSrc.puts("}")
+    }
+  }
+
+  private def attrWriteRepeatEos(attr: AttrLikeSpec, id: Identifier, defEndian: Option[Endianness]): Unit = {
+    if (attr.valid.nonEmpty) {
+      throw new NotImplementedError(s"C++ read-write prototype does not support validations on repeated fields yet: ${attr.path.mkString("/")}")
+    }
+
+    val fixedEndian = defEndian match {
+      case Some(fe: FixedEndian) => Some(fe)
+      case None => None
+      case _ => None
+    }
+
+    attrAssertRepeatFieldPresent(attr, id)
+    fixedSerializedSizeExpr(attr.dataType) match {
+      case Some(itemSizeExpr) =>
+        importListSrc.addSystem("stdexcept")
+        outSrc.puts(s"const std::size_t _remaining = static_cast<std::size_t>(${normalIO}->size() - ${normalIO}->pos());")
+        outSrc.puts(s"const std::size_t _actual = ${privateMemberName(id)}->size() * static_cast<std::size_t>($itemSizeExpr);")
+        outSrc.puts("if (_remaining != 0 && _remaining != _actual) {")
+        outSrc.inc
+        outSrc.puts(s"""throw std::runtime_error("${attr.path.mkString("/", "/", "")}: expected: " + kaitai::kstream::to_string(_remaining) + ", actual: " + kaitai::kstream::to_string(_actual));""")
+        outSrc.dec
+        outSrc.puts("}")
+      case None =>
+        throw new NotImplementedError(s"C++ read-write prototype does not support repeat: eos for field type `${attr.dataType}` yet: ${attr.path.mkString("/")}")
+    }
+
+    emitWriteRepeatLoop(attr, id, fixedEndian)
+  }
+
+  private def attrCheckRepeatEos(attr: AttrLikeSpec, id: Identifier): Unit = {
+    if (attr.valid.nonEmpty) {
+      throw new NotImplementedError(s"C++ read-write prototype does not support validations on repeated fields yet: ${attr.path.mkString("/")}")
+    }
+
+    attrAssertRepeatFieldPresent(attr, id)
+    emitCheckRepeatLoop(attr, id) {}
+  }
+
+  private def emitWriteRepeatLoop(attr: AttrLikeSpec, id: Identifier, fixedEndian: Option[FixedEndian]): Unit = {
+    val vecType = s"std::vector<${kaitaiType2NativeType(attr.dataType)}>"
+    val itemExpr = "(*it)"
+
+    attrAssertRepeatFieldPresent(attr, id)
+    outSrc.puts(s"for ($vecType::const_iterator it = ${privateMemberName(id)}->begin(); it != ${privateMemberName(id)}->end(); ++it) {")
+    outSrc.inc
+    emitWriteExpr(attr, attr.dataType, itemExpr, fixedEndian)
+    outSrc.dec
+    outSrc.puts("}")
+  }
+
+  private def emitCheckRepeatLoop(attr: AttrLikeSpec, id: Identifier)(extraBody: => Unit): Unit = {
+    val vecType = s"std::vector<${kaitaiType2NativeType(attr.dataType)}>"
+    outSrc.puts(s"for ($vecType::const_iterator it = ${privateMemberName(id)}->begin(); it != ${privateMemberName(id)}->end(); ++it) {")
+    outSrc.inc
+    outSrc.puts(s"const std::size_t i = static_cast<std::size_t>(it - ${privateMemberName(id)}->begin());")
+    outSrc.puts(s"const ${kaitaiType2NativeType(attr.dataType.asNonOwning())} ${translator.doName(Identifier.ITERATOR)} = (*it);")
+    emitCheckExpr(attr, attr.dataType, "(*it)")
+    extraBody
+    outSrc.dec
+    outSrc.puts("}")
+  }
+
+  private def repeatUntilExpr(id: Identifier, dataType: DataType, repUntil: RepeatUntil): String = {
+    val prevIteratorType = typeProvider._currentIteratorType
+    typeProvider._currentIteratorType = Some(dataType)
+    try {
+      expression(repUntil.expr)
+    } finally {
+      typeProvider._currentIteratorType = prevIteratorType
+    }
+  }
+
+  private def fixedSerializedSizeExpr(dataType: DataType): Option[String] = dataType match {
+    case Int1Type(_) => Some("1")
+    case IntMultiType(_, width, _) => Some(width.width.toString)
+    case FloatMultiType(width, _) => Some(width.width.toString)
+    case et: EnumType =>
+      fixedSerializedSizeExpr(et.basedOn)
+    case bt: BytesLimitType if bt.terminator.isEmpty && bt.padRight.isEmpty && bt.process.isEmpty =>
+      Some(expression(bt.size))
+    case st: StrFromBytesType =>
+      st.bytes match {
+        case bt: BytesLimitType if bt.terminator.isEmpty && bt.padRight.isEmpty && bt.process.isEmpty =>
+          Some(expression(bt.size))
+        case _ =>
+          None
+      }
+    case _ =>
+      None
+  }
+
+  private def emitWriteExpr(attr: AttrLikeSpec, dataType: DataType, expr: String, fixedEndian: Option[FixedEndian]): Unit = {
+    dataType match {
+      case rt: ReadableType =>
+        outSrc.puts(s"${normalIO}->write_${rt.apiCall(fixedEndian)}($expr);")
+      case et: EnumType =>
+        et.basedOn match {
+          case rt: ReadableType =>
+            outSrc.puts(s"${normalIO}->write_${rt.apiCall(fixedEndian)}(static_cast<${kaitaiType2NativeType(et.basedOn)}>($expr));")
+          case _ =>
+            throw new NotImplementedError(s"C++ read-write prototype does not support enum base type `${et.basedOn}` yet: ${attr.path.mkString("/")}")
+        }
+      case _: BytesType =>
+        outSrc.puts(s"${normalIO}->write_bytes($expr);")
+      case _: StrType =>
+        outSrc.puts(s"${normalIO}->write_bytes($expr);")
+      case ut: UserType =>
+        val userExpr = nonOwningPointer(expr, ut)
+        attrAssertUserTypePresent(attr, attr.id, userExpr)
+        outSrc.puts(s"$userExpr->_set_io(${normalIO});")
+        outSrc.puts(s"$userExpr->_write();")
+      case _ =>
+        throw new NotImplementedError(s"C++ read-write prototype does not support field type `${dataType}` yet: ${attr.path.mkString("/")}")
+    }
+  }
+
+  private def emitCheckExpr(attr: AttrLikeSpec, dataType: DataType, expr: String): Unit = {
+    dataType match {
+      case ut: UserType =>
+        val userExpr = nonOwningPointer(expr, ut)
+        attrAssertExprPresent(attr, userExpr, "nested object is not set")
+        outSrc.puts(s"$userExpr->_check();")
+      case bt: BytesLimitType =>
+        attrCheckFixedSizeExpr(attr, expr, bt.size)
+      case st: StrFromBytesType =>
+        st.bytes match {
+          case bt: BytesLimitType =>
+            attrCheckFixedSizeExpr(attr, expr, bt.size)
+          case _ =>
+        }
+      case _ =>
+    }
+  }
+
+  private def attrIsSetExpr(id: Identifier, dataType: DataType): String =
+    if (needsDestruction(dataType)) {
+      s"${nonOwningPointer(privateMemberName(id), dataType)} != $nullPtr"
+    } else {
+      s"!${nullFlagForName(id)}"
+    }
+
+  private def attrAssertExprPresent(attr: AttrLikeSpec, expr: String, message: String): Unit = {
+    importListSrc.addSystem("stdexcept")
+    outSrc.puts(s"if ($expr == $nullPtr) {")
+    outSrc.inc
+    outSrc.puts(s"""throw std::runtime_error("${attr.path.mkString("/", "/", "")}: $message");""")
+    outSrc.dec
+    outSrc.puts("}")
+  }
+
+  private def attrCheckFixedSize(attr: AttrLikeSpec, id: Identifier, expectedSize: Ast.expr): Unit = {
+    attrCheckFixedSizeExpr(attr, privateMemberName(id), expectedSize)
+  }
+
+  private def attrCheckFixedSizeExpr(attr: AttrLikeSpec, expr: String, expectedSize: Ast.expr): Unit = {
+    importListSrc.addSystem("stdexcept")
+    outSrc.puts(s"if ($expr.size() != static_cast<std::string::size_type>(${expression(expectedSize)})) {")
+    outSrc.inc
+    outSrc.puts(s"""throw std::runtime_error("${attr.path.mkString("/", "/", "")}: size mismatch");""")
+    outSrc.dec
+    outSrc.puts("}")
   }
 
   override def universalDoc(doc: DocSpec): Unit = {
@@ -467,6 +775,9 @@ class CppCompiler(
   }
 
   override def attrInit(attr: AttrLikeSpec): Unit = {
+    if (attr.isNullable && !needsDestruction(attr.dataTypeComposite))
+      outSrc.puts(s"${nullFlagForName(attr.id)} = true;")
+
     // Only owning raw pointers (used in C++98) must be zero-initialized. Fields
     // of type `std::unique_ptr` (used for all pointers in C++11) don't need to
     // be initialized to `nullptr`, as this is the default behavior.

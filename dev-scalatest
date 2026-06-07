@@ -1,0 +1,12 @@
+#!/bin/sh
+set -eu
+
+if [ "$#" -lt 1 ]; then
+    echo "usage: $0 <fully.qualified.SuiteName> [scalatest args...]" >&2
+    exit 1
+fi
+
+SUITE="$1"
+shift
+
+exec sbt "compilerJVM/Test/runMain org.scalatest.tools.Runner -R compiler/jvm/target/scala-2.13/test-classes -oNCXELOPQRM -s $SUITE $*"

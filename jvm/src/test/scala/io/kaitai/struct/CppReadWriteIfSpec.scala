@@ -7,7 +7,7 @@ import io.kaitai.struct.format.KSVersion
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
-class CppReadWriteIfSpec extends AnyFunSuite with Matchers {
+class CppReadWriteIfSpec extends AnyFunSuite with Matchers with CppReadWriteSpecSupport {
   KSVersion.current = Version.version
 
   test("cpp_stl_11 emits if_write read-write API") {
@@ -21,7 +21,7 @@ class CppReadWriteIfSpec extends AnyFunSuite with Matchers {
     )
 
     val (specsOpt, problems) = JavaKSYParser.localFileToSpecs("../tests/formats_rw/if_write.ksy", config)
-    problems shouldBe empty
+    assertNoNonStyleProblems(problems)
 
     val compiled = Main.compile(specsOpt.get, specsOpt.get.firstSpec, CppCompiler, config.runtime)
     val files = compiled.files.map(file => file.fileName -> file.contents).toMap

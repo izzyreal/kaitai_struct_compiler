@@ -31,6 +31,14 @@ If you're looking for information on:
 * How to build the compiler, run the test suite, and join the
   development — see the [developer memo](https://doc.kaitai.io/developers.html).
 
+For targeted JVM ScalaTest runs during local development, `./dev-scalatest`
+wraps the direct ScalaTest runner form that isolates a single suite cleanly.
+Example:
+
+```sh
+./dev-scalatest io.kaitai.struct.CppReadWriteBitsSpec
+```
+
 ## Issues
 
 Compiler issues are tracked in the

@@ -7,7 +7,7 @@ import io.kaitai.struct.format.KSVersion
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
-class CppReadWriteOpenEndedRepeatsSpec extends AnyFunSuite with Matchers {
+class CppReadWriteOpenEndedRepeatsSpec extends AnyFunSuite with Matchers with CppReadWriteSpecSupport {
   KSVersion.current = Version.version
 
   private val config = CLIConfig(
@@ -21,7 +21,7 @@ class CppReadWriteOpenEndedRepeatsSpec extends AnyFunSuite with Matchers {
 
   test("cpp_stl_11 emits repeat_until_write read-write checks") {
     val (specsOpt, problems) = JavaKSYParser.localFileToSpecs("../tests/formats_rw/repeat_until_write.ksy", config)
-    problems shouldBe empty
+    assertNoNonStyleProblems(problems)
 
     val compiled = Main.compile(specsOpt.get, specsOpt.get.firstSpec, CppCompiler, config.runtime)
     val files = compiled.files.map(file => file.fileName -> file.contents).toMap
@@ -34,7 +34,7 @@ class CppReadWriteOpenEndedRepeatsSpec extends AnyFunSuite with Matchers {
 
   test("cpp_stl_11 emits repeat_eos_write fixed-capacity checks") {
     val (specsOpt, problems) = JavaKSYParser.localFileToSpecs("../tests/formats_rw/repeat_eos_write.ksy", config)
-    problems shouldBe empty
+    assertNoNonStyleProblems(problems)
 
     val compiled = Main.compile(specsOpt.get, specsOpt.get.firstSpec, CppCompiler, config.runtime)
     val files = compiled.files.map(file => file.fileName -> file.contents).toMap

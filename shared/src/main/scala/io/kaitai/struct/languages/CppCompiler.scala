@@ -18,7 +18,8 @@ class CppCompiler(
     with AllocateAndStoreIO
     with UniversalDoc
     with SwitchIfOps
-    with EveryReadIsExpression {
+    with EveryReadIsExpression
+    with FetchInstances {
   import CppCompiler._
 
   val importListSrc = new CppImportList
@@ -43,6 +44,7 @@ class CppCompiler(
   case object PublicAccess extends AccessMode
 
   var accessMode: AccessMode = PublicAccess
+  var writeFooterNeedsFetchInstances: Boolean = false
 
   override def indent: String = "    "
 
@@ -360,6 +362,7 @@ class CppCompiler(
   }
 
   override def writeHeader(endian: Option[FixedEndian], isEmpty: Boolean): Unit = {
+    writeFooterNeedsFetchInstances = endian.isEmpty
     val suffix = endian match {
       case Some(e) => s"_${e.toSuffix}"
       case None => ""
@@ -377,10 +380,33 @@ class CppCompiler(
   }
 
   override def writeFooter(): Unit = {
+    if (writeFooterNeedsFetchInstances)
+      outSrc.puts("_fetch_instances();")
     outSrc.puts("m__dirty = false;")
     outSrc.dec
     outSrc.puts("}")
   }
+
+  override def fetchInstancesHeader(): Unit = {
+    ensureMode(PublicAccess)
+    outHdr.puts("void _fetch_instances();")
+    outSrc.puts
+    outSrc.puts(s"void ${types2class(typeProvider.nowClass.name)}::_fetch_instances() {")
+    outSrc.inc
+  }
+
+  override def fetchInstancesFooter(): Unit = {
+    outSrc.dec
+    outSrc.puts("}")
+  }
+
+  override def attrInvokeFetchInstances(baseExpr: Ast.expr, exprType: DataType, dataType: DataType): Unit = {
+    val expr = nonOwningPointer(expression(baseExpr), dataType)
+    outSrc.puts(s"$expr->_fetch_instances();")
+  }
+
+  override def attrInvokeInstance(instName: InstanceIdentifier): Unit =
+    outSrc.puts(s"${publicMemberName(instName)}();")
 
   override def runWriteCalc(): Unit = {
     outSrc.puts("if (m__is_le == -1) {")
@@ -414,16 +440,50 @@ class CppCompiler(
     outSrc.puts("}")
   }
 
+  override def writeInstanceFooter(): Unit = {
+    outSrc.dec
+    outSrc.puts("}")
+  }
+
+  override def checkInstanceFooter(): Unit = {
+    outSrc.dec
+    outSrc.puts("}")
+  }
+
   override def attrWrite(attr: AttrLikeSpec, id: Identifier, defEndian: Option[Endianness]): Unit = {
+    val io = attr match {
+      case pis: ParseInstanceSpec =>
+        val io = pis.io.map(useIO).getOrElse(normalIO)
+        pis.pos.foreach { pos =>
+          pushPos(io)
+          seek(io, pos)
+        }
+        io
+      case _ =>
+        normalIO
+    }
+
     attr.cond.repeat match {
       case RepeatExpr(repeatExpr) =>
         attrWriteRepeatExpr(attr, id, repeatExpr, defEndian)
+        attr match {
+          case pis: ParseInstanceSpec if pis.pos.isDefined => popPos(io)
+          case _ =>
+        }
         return
       case repUntil: RepeatUntil =>
         attrWriteRepeatUntil(attr, id, repUntil, defEndian)
+        attr match {
+          case pis: ParseInstanceSpec if pis.pos.isDefined => popPos(io)
+          case _ =>
+        }
         return
       case RepeatEos =>
         attrWriteRepeatEos(attr, id, defEndian)
+        attr match {
+          case pis: ParseInstanceSpec if pis.pos.isDefined => popPos(io)
+          case _ =>
+        }
         return
       case NoRepeat =>
     }
@@ -438,15 +498,26 @@ class CppCompiler(
       case Some(ifExpr) =>
         outSrc.puts(s"if (${expression(ifExpr)}) {")
         outSrc.inc
-        emitWriteExpr(attr, attr.dataType, privateMemberName(id), fixedEndian)
+        emitWriteExpr(attr, attr.dataType, privateMemberName(id), fixedEndian, io)
         outSrc.dec
         outSrc.puts("}")
       case None =>
-        emitWriteExpr(attr, attr.dataType, privateMemberName(id), fixedEndian)
+        emitWriteExpr(attr, attr.dataType, privateMemberName(id), fixedEndian, io)
+    }
+
+    attr match {
+      case pis: ParseInstanceSpec if pis.pos.isDefined =>
+        popPos(io)
+      case _ =>
     }
   }
 
   override def attrCheck(attr: AttrLikeSpec, id: Identifier): Unit = {
+    val io = attr match {
+      case pis: ParseInstanceSpec => pis.io.map(useIO).getOrElse(normalIO)
+      case _ => normalIO
+    }
+
     attr.cond.repeat match {
       case RepeatExpr(repeatExpr) =>
         attrCheckRepeatExpr(attr, id, repeatExpr)
@@ -471,7 +542,7 @@ class CppCompiler(
         outSrc.puts(s"""throw std::runtime_error("${attr.path.mkString("/", "/", "")}: conditional field is not set");""")
         outSrc.dec
         outSrc.puts("}")
-        emitCheckExpr(attr, attr.dataType, privateMemberName(id))
+        emitCheckExpr(attr, attr.dataType, privateMemberName(id), io)
         attr.valid.foreach(valid => attrValidate(attr, valid, true))
         outSrc.dec
         outSrc.puts("} else {")
@@ -491,7 +562,7 @@ class CppCompiler(
       case _ =>
     }
 
-    emitCheckExpr(attr, attr.dataType, privateMemberName(id))
+    emitCheckExpr(attr, attr.dataType, privateMemberName(id), io)
     attr.valid.foreach(valid => attrValidate(attr, valid, true))
   }
 
@@ -529,7 +600,7 @@ class CppCompiler(
     attrAssertRepeatFieldPresent(attr, id)
     outSrc.puts(s"for ($vecType::const_iterator it = ${privateMemberName(id)}->begin(); it != ${privateMemberName(id)}->end(); ++it) {")
     outSrc.inc
-    emitWriteExpr(attr, attr.dataType, itemExpr, fixedEndian)
+    emitWriteExpr(attr, attr.dataType, itemExpr, fixedEndian, normalIO)
     outSrc.dec
     outSrc.puts("}")
   }
@@ -549,7 +620,7 @@ class CppCompiler(
     val vecType = s"std::vector<${kaitaiType2NativeType(attr.dataType)}>"
     outSrc.puts(s"for ($vecType::const_iterator it = ${privateMemberName(id)}->begin(); it != ${privateMemberName(id)}->end(); ++it) {")
     outSrc.inc
-    emitCheckExpr(attr, attr.dataType, "(*it)")
+    emitCheckExpr(attr, attr.dataType, "(*it)", normalIO)
     outSrc.dec
     outSrc.puts("}")
   }
@@ -637,7 +708,7 @@ class CppCompiler(
     attrAssertRepeatFieldPresent(attr, id)
     outSrc.puts(s"for ($vecType::const_iterator it = ${privateMemberName(id)}->begin(); it != ${privateMemberName(id)}->end(); ++it) {")
     outSrc.inc
-    emitWriteExpr(attr, attr.dataType, itemExpr, fixedEndian)
+    emitWriteExpr(attr, attr.dataType, itemExpr, fixedEndian, normalIO)
     outSrc.dec
     outSrc.puts("}")
   }
@@ -648,7 +719,7 @@ class CppCompiler(
     outSrc.inc
     outSrc.puts(s"const std::size_t i = static_cast<std::size_t>(it - ${privateMemberName(id)}->begin());")
     outSrc.puts(s"const ${kaitaiType2NativeType(attr.dataType.asNonOwning())} ${translator.doName(Identifier.ITERATOR)} = (*it);")
-    emitCheckExpr(attr, attr.dataType, "(*it)")
+    emitCheckExpr(attr, attr.dataType, "(*it)", normalIO)
     extraBody
     outSrc.dec
     outSrc.puts("}")
@@ -683,36 +754,106 @@ class CppCompiler(
       None
   }
 
-  private def emitWriteExpr(attr: AttrLikeSpec, dataType: DataType, expr: String, fixedEndian: Option[FixedEndian]): Unit = {
+  private def rawSubstreamExpectedSizeExpr(bytesType: BytesType): Option[String] = bytesType match {
+    case bt: BytesLimitType if bt.terminator.isEmpty && bt.padRight.isEmpty && bt.process.isEmpty =>
+      Some(expression(bt.size))
+    case _ =>
+      None
+  }
+
+  private def prepareUserTypeFromBytesIO(attr: AttrLikeSpec, bytesType: BytesType): (String, String) = {
+    if (attr.cond.repeat != NoRepeat) {
+      throw new NotImplementedError(s"C++ read-write prototype does not support repeated raw-substream user types yet: ${attr.path.mkString("/")}")
+    }
+
+    val rawId = RawIdentifier(attr.id)
+    val rawExpr = privateMemberName(rawId)
+    val sizeExpr = rawSubstreamExpectedSizeExpr(bytesType).getOrElse {
+      throw new NotImplementedError(s"C++ read-write prototype does not support this raw substream shape yet: ${attr.path.mkString("/")}")
+    }
+    outSrc.puts(s"$rawExpr = std::string(static_cast<std::string::size_type>($sizeExpr), '\\0');")
+    (allocateIO(rawId, NoRepeat), sizeExpr)
+  }
+
+  private def assertRawSubstreamSize(attr: AttrLikeSpec, io: String, sizeExpr: String): Unit = {
+    importListSrc.addSystem("stdexcept")
+    outSrc.puts(s"if ($io->pos() != static_cast<uint64_t>($sizeExpr)) {")
+    outSrc.inc
+    outSrc.puts(s"""throw std::runtime_error("${attr.path.mkString("/", "/", "")}: serialized size mismatch");""")
+    outSrc.dec
+    outSrc.puts("}")
+    outSrc.puts(s"if ($io->to_byte_array().size() != static_cast<std::string::size_type>($sizeExpr)) {")
+    outSrc.inc
+    outSrc.puts(s"""throw std::runtime_error("${attr.path.mkString("/", "/", "")}: raw buffer size mismatch");""")
+    outSrc.dec
+    outSrc.puts("}")
+  }
+
+  private def emitWriteExpr(attr: AttrLikeSpec, dataType: DataType, expr: String, fixedEndian: Option[FixedEndian], io: String): Unit = {
     dataType match {
       case rt: ReadableType =>
-        outSrc.puts(s"${normalIO}->write_${rt.apiCall(fixedEndian)}($expr);")
+        outSrc.puts(s"${io}->write_${rt.apiCall(fixedEndian)}($expr);")
+      case BitsType1(bitEndian) =>
+        outSrc.puts(s"${io}->write_bits_int_${bitEndian.toSuffix}(1, (($expr) ? 1 : 0));")
+      case BitsType(width, bitEndian) =>
+        outSrc.puts(s"${io}->write_bits_int_${bitEndian.toSuffix}($width, $expr);")
       case et: EnumType =>
         et.basedOn match {
           case rt: ReadableType =>
-            outSrc.puts(s"${normalIO}->write_${rt.apiCall(fixedEndian)}(static_cast<${kaitaiType2NativeType(et.basedOn)}>($expr));")
+            outSrc.puts(s"${io}->write_${rt.apiCall(fixedEndian)}(static_cast<${kaitaiType2NativeType(et.basedOn)}>($expr));")
           case _ =>
             throw new NotImplementedError(s"C++ read-write prototype does not support enum base type `${et.basedOn}` yet: ${attr.path.mkString("/")}")
         }
       case _: BytesType =>
-        outSrc.puts(s"${normalIO}->write_bytes($expr);")
+        outSrc.puts(s"${io}->write_bytes($expr);")
       case _: StrType =>
-        outSrc.puts(s"${normalIO}->write_bytes($expr);")
+        outSrc.puts(s"${io}->write_bytes($expr);")
+      case ut: UserTypeFromBytes =>
+        val userExpr = nonOwningPointer(expr, ut)
+        attrAssertUserTypePresent(attr, attr.id, userExpr)
+        val (subIo, sizeExpr) = prepareUserTypeFromBytesIO(attr, ut.bytes)
+        outSrc.puts(s"$userExpr->_set_io($subIo);")
+        outSrc.puts(s"$userExpr->_write();")
+        assertRawSubstreamSize(attr, subIo, sizeExpr)
+        outSrc.puts(s"${privateMemberName(RawIdentifier(attr.id))} = $subIo->to_byte_array();")
+        outSrc.puts(s"${io}->write_bytes(${privateMemberName(RawIdentifier(attr.id))});")
+      case ut: CalcUserTypeFromBytes =>
+        val userExpr = nonOwningPointer(expr, ut)
+        attrAssertUserTypePresent(attr, attr.id, userExpr)
+        val (subIo, sizeExpr) = prepareUserTypeFromBytesIO(attr, ut.bytes)
+        outSrc.puts(s"$userExpr->_set_io($subIo);")
+        outSrc.puts(s"$userExpr->_write();")
+        assertRawSubstreamSize(attr, subIo, sizeExpr)
+        outSrc.puts(s"${privateMemberName(RawIdentifier(attr.id))} = $subIo->to_byte_array();")
+        outSrc.puts(s"${io}->write_bytes(${privateMemberName(RawIdentifier(attr.id))});")
       case ut: UserType =>
         val userExpr = nonOwningPointer(expr, ut)
         attrAssertUserTypePresent(attr, attr.id, userExpr)
-        outSrc.puts(s"$userExpr->_set_io(${normalIO});")
+        outSrc.puts(s"$userExpr->_set_io(${io});")
         outSrc.puts(s"$userExpr->_write();")
       case _ =>
         throw new NotImplementedError(s"C++ read-write prototype does not support field type `${dataType}` yet: ${attr.path.mkString("/")}")
     }
   }
 
-  private def emitCheckExpr(attr: AttrLikeSpec, dataType: DataType, expr: String): Unit = {
+  private def emitCheckExpr(attr: AttrLikeSpec, dataType: DataType, expr: String, io: String): Unit = {
     dataType match {
+      case ut: UserTypeFromBytes =>
+        val userExpr = nonOwningPointer(expr, ut)
+        attrAssertExprPresent(attr, userExpr, "nested object is not set")
+        val (subIo, _) = prepareUserTypeFromBytesIO(attr, ut.bytes)
+        outSrc.puts(s"$userExpr->_set_io($subIo);")
+        outSrc.puts(s"$userExpr->_check();")
+      case ut: CalcUserTypeFromBytes =>
+        val userExpr = nonOwningPointer(expr, ut)
+        attrAssertExprPresent(attr, userExpr, "nested object is not set")
+        val (subIo, _) = prepareUserTypeFromBytesIO(attr, ut.bytes)
+        outSrc.puts(s"$userExpr->_set_io($subIo);")
+        outSrc.puts(s"$userExpr->_check();")
       case ut: UserType =>
         val userExpr = nonOwningPointer(expr, ut)
         attrAssertExprPresent(attr, userExpr, "nested object is not set")
+        outSrc.puts(s"$userExpr->_set_io(${io});")
         outSrc.puts(s"$userExpr->_check();")
       case bt: BytesLimitType =>
         attrCheckFixedSizeExpr(attr, expr, bt.size)
@@ -985,6 +1126,17 @@ class CppCompiler(
   }
 
   override def condIfFooter: Unit = {
+    outSrc.dec
+    outSrc.puts("}")
+  }
+
+  override def condRepeatCommonHeader(id: Identifier, io: String, dataType: DataType): Unit = {
+    importListSrc.addSystem("cstddef")
+    outSrc.puts(s"for (std::size_t i = 0; i < ${privateMemberName(id)}->size(); ++i) {")
+    outSrc.inc
+  }
+
+  override def condRepeatCommonFooter: Unit = {
     outSrc.dec
     outSrc.puts("}")
   }
@@ -1267,6 +1419,28 @@ class CppCompiler(
     declareNullFlag(attrName, attrType, isNullable)
   }
 
+  override def instanceWriteFlagDeclaration(attrName: InstanceIdentifier): Unit = {
+    ensureMode(PrivateAccess)
+    outHdr.puts(s"bool ${writeFlagForName(attrName)};")
+    outHdr.puts(s"bool ${enabledFlagForName(attrName)};")
+  }
+
+  override def instanceWriteFlagInit(attrName: InstanceIdentifier): Unit = {
+    outSrc.puts(s"${writeFlagForName(attrName)} = false;")
+    outSrc.puts(s"${enabledFlagForName(attrName)} = true;")
+  }
+
+  override def instanceSetWriteFlag(instName: InstanceIdentifier): Unit =
+    outSrc.puts(s"${writeFlagForName(instName)} = ${enabledFlagForName(instName)};")
+
+  override def instanceClearWriteFlag(instName: InstanceIdentifier): Unit =
+    outSrc.puts(s"${writeFlagForName(instName)} = false;")
+
+  override def instanceEnabledSetter(instName: InstanceIdentifier): Unit = {
+    ensureMode(PublicAccess)
+    outHdr.puts(s"void set_${idToStr(instName)}_enabled(bool _v) { m__dirty = true; ${enabledFlagForName(instName)} = _v; }")
+  }
+
   override def instanceHeader(className: List[String], instName: InstanceIdentifier, dataType: DataType, isNullable: Boolean): Unit = {
     ensureMode(PublicAccess)
     outHdr.puts(s"${kaitaiType2NativeType(dataType.asNonOwning())} ${publicMemberName(instName)}();")
@@ -1286,6 +1460,44 @@ class CppCompiler(
     outSrc.inc
     instanceReturn(instName, dataType, false)
     outSrc.dec
+  }
+
+  override def instanceCheckWriteFlagAndWrite(instName: InstanceIdentifier): Unit = {
+    outSrc.puts(s"if (${writeFlagForName(instName)})")
+    outSrc.inc
+    outSrc.puts(s"_write_${idToStr(instName)}();")
+    outSrc.dec
+  }
+
+  override def instanceReturnNullIfDisabled(instName: InstanceIdentifier): Unit = {
+    outSrc.puts(s"if (!${enabledFlagForName(instName)})")
+    outSrc.inc
+    outSrc.puts(s"return ${disabledReturnExprForType(typeProvider.nowClass.instances(instName).dataTypeComposite)};")
+    outSrc.dec
+  }
+
+  override def writeInstanceHeader(instName: InstanceIdentifier): Unit = {
+    ensureMode(PrivateAccess)
+    outHdr.puts(s"void _write_${idToStr(instName)}();")
+    outSrc.puts
+    outSrc.puts(s"void ${types2class(typeProvider.nowClass.name)}::_write_${idToStr(instName)}() {")
+    outSrc.inc
+    instanceClearWriteFlag(instName)
+  }
+
+  override def checkInstanceHeader(instName: InstanceIdentifier): Unit = {
+    outSrc.puts(s"if (${enabledFlagForName(instName)}) {")
+    outSrc.inc
+  }
+
+  override def instanceHasValueIfHeader(instName: InstanceIdentifier): Unit = {
+    outSrc.puts(s"if (${calculatedFlagForName(instName)}) {")
+    outSrc.inc
+  }
+
+  override def instanceHasValueIfFooter(): Unit = {
+    outSrc.dec
+    outSrc.puts("}")
   }
 
   override def instanceReturn(instName: InstanceIdentifier, attrType: DataType, isNullable: Boolean): Unit =
@@ -1408,6 +1620,12 @@ class CppCompiler(
   def calculatedFlagForName(ksName: Identifier) =
     s"f_${idToStr(ksName)}"
 
+  def writeFlagForName(ksName: Identifier) =
+    s"w_${idToStr(ksName)}"
+
+  def enabledFlagForName(ksName: Identifier) =
+    s"e_${idToStr(ksName)}"
+
   /**
     * Returns name of a member that stores "null flag" for a given attribute,
     * that is, if it's true, then associated attribute is null.
@@ -1480,6 +1698,16 @@ class CppCompiler(
     case UniqueAndRawPointers => s"std::move($expr)"
     case _ => expr
   }
+
+  def disabledReturnExprForType(attrType: DataType): String =
+    if (needsDestruction(attrType)) {
+      nullPtr
+    } else attrType match {
+      case _: StrType | _: BytesType => "std::string()"
+      case _: BooleanType => "false"
+      case _: EnumType => s"static_cast<${kaitaiType2NativeType(attrType.asNonOwning())}>(0)"
+      case _ => "0"
+    }
 
   override def ksErrorName(err: KSError): String = err match {
     case EndOfStreamError => "std::ifstream::failure"

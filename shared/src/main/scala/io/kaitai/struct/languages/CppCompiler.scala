@@ -726,6 +726,9 @@ class CppCompiler(
         outSrc.puts(s"""throw std::runtime_error("${attr.path.mkString("/", "/", "")}: expected: " + kaitai::kstream::to_string(_remaining) + ", actual: " + kaitai::kstream::to_string(_actual));""")
         outSrc.dec
         outSrc.puts("}")
+      case None if attr.dataType.isInstanceOf[UserType] || attr.dataType.isInstanceOf[UserTypeInstream] =>
+        // No fixed-size shortcut is available for plain repeated user types.
+        // For repeat:eos, writing the provided elements is still well-defined.
       case None =>
         throw new NotImplementedError(s"C++ read-write prototype does not support repeat: eos for field type `${attr.dataType}` yet: ${attr.path.mkString("/")}")
     }
@@ -932,6 +935,8 @@ class CppCompiler(
         et.basedOn match {
           case rt: ReadableType =>
             outSrc.puts(s"${io}->write_${rt.apiCall(fixedEndian)}(static_cast<${kaitaiType2NativeType(et.basedOn)}>($expr));")
+          case BitsType(width, bitEndian) =>
+            outSrc.puts(s"${io}->write_bits_int_${bitEndian.toSuffix}($width, static_cast<uint64_t>($expr));")
           case _ =>
             throw new NotImplementedError(s"C++ read-write prototype does not support enum base type `${et.basedOn}` yet: ${attr.path.mkString("/")}")
         }

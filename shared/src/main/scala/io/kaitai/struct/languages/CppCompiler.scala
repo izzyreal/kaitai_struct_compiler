@@ -750,6 +750,10 @@ class CppCompiler(
         case _ =>
           None
       }
+    case ut: UserTypeFromBytes =>
+      rawSubstreamExpectedSizeExpr(ut.bytes)
+    case ut: CalcUserTypeFromBytes =>
+      rawSubstreamExpectedSizeExpr(ut.bytes)
     case _ =>
       None
   }
@@ -775,16 +779,47 @@ class CppCompiler(
     (allocateIO(rawId, NoRepeat), sizeExpr)
   }
 
-  private def assertRawSubstreamSize(attr: AttrLikeSpec, io: String, sizeExpr: String): Unit = {
+  private def assertRawSubstreamSize(attr: AttrLikeSpec, io: String, sizeExpr: String, isPointer: Boolean = true): Unit = {
     importListSrc.addSystem("stdexcept")
-    outSrc.puts(s"if ($io->pos() != static_cast<uint64_t>($sizeExpr)) {")
+    val access = if (isPointer) "->" else "."
+    outSrc.puts(s"if ($io${access}pos() != static_cast<uint64_t>($sizeExpr)) {")
     outSrc.inc
     outSrc.puts(s"""throw std::runtime_error("${attr.path.mkString("/", "/", "")}: serialized size mismatch");""")
     outSrc.dec
     outSrc.puts("}")
-    outSrc.puts(s"if ($io->to_byte_array().size() != static_cast<std::string::size_type>($sizeExpr)) {")
+    outSrc.puts(s"if ($io${access}to_byte_array().size() != static_cast<std::string::size_type>($sizeExpr)) {")
     outSrc.inc
     outSrc.puts(s"""throw std::runtime_error("${attr.path.mkString("/", "/", "")}: raw buffer size mismatch");""")
+    outSrc.dec
+    outSrc.puts("}")
+  }
+
+  private def emitRepeatedRawSubstreamWrite(attr: AttrLikeSpec, bytesType: BytesType, userExpr: String, io: String): Unit = {
+    val sizeExpr = rawSubstreamExpectedSizeExpr(bytesType).getOrElse {
+      throw new NotImplementedError(s"C++ read-write prototype does not support this repeated raw substream shape yet: ${attr.path.mkString("/")}")
+    }
+    outSrc.puts("{")
+    outSrc.inc
+    outSrc.puts(s"std::string _raw = std::string(static_cast<std::string::size_type>($sizeExpr), '\\0');")
+    outSrc.puts(s"$kstreamName _io_raw(_raw);")
+    outSrc.puts(s"$userExpr->_set_io(&_io_raw);")
+    outSrc.puts(s"$userExpr->_write();")
+    assertRawSubstreamSize(attr, "_io_raw", sizeExpr, isPointer = false)
+    outSrc.puts(s"${io}->write_bytes(_io_raw.to_byte_array());")
+    outSrc.dec
+    outSrc.puts("}")
+  }
+
+  private def emitRepeatedRawSubstreamCheck(attr: AttrLikeSpec, bytesType: BytesType, userExpr: String): Unit = {
+    val sizeExpr = rawSubstreamExpectedSizeExpr(bytesType).getOrElse {
+      throw new NotImplementedError(s"C++ read-write prototype does not support this repeated raw substream shape yet: ${attr.path.mkString("/")}")
+    }
+    outSrc.puts("{")
+    outSrc.inc
+    outSrc.puts(s"std::string _raw = std::string(static_cast<std::string::size_type>($sizeExpr), '\\0');")
+    outSrc.puts(s"$kstreamName _io_raw(_raw);")
+    outSrc.puts(s"$userExpr->_set_io(&_io_raw);")
+    outSrc.puts(s"$userExpr->_check();")
     outSrc.dec
     outSrc.puts("}")
   }
@@ -811,21 +846,29 @@ class CppCompiler(
       case ut: UserTypeFromBytes =>
         val userExpr = nonOwningPointer(expr, ut)
         attrAssertUserTypePresent(attr, attr.id, userExpr)
-        val (subIo, sizeExpr) = prepareUserTypeFromBytesIO(attr, ut.bytes)
-        outSrc.puts(s"$userExpr->_set_io($subIo);")
-        outSrc.puts(s"$userExpr->_write();")
-        assertRawSubstreamSize(attr, subIo, sizeExpr)
-        outSrc.puts(s"${privateMemberName(RawIdentifier(attr.id))} = $subIo->to_byte_array();")
-        outSrc.puts(s"${io}->write_bytes(${privateMemberName(RawIdentifier(attr.id))});")
+        if (attr.cond.repeat == NoRepeat) {
+          val (subIo, sizeExpr) = prepareUserTypeFromBytesIO(attr, ut.bytes)
+          outSrc.puts(s"$userExpr->_set_io($subIo);")
+          outSrc.puts(s"$userExpr->_write();")
+          assertRawSubstreamSize(attr, subIo, sizeExpr)
+          outSrc.puts(s"${privateMemberName(RawIdentifier(attr.id))} = $subIo->to_byte_array();")
+          outSrc.puts(s"${io}->write_bytes(${privateMemberName(RawIdentifier(attr.id))});")
+        } else {
+          emitRepeatedRawSubstreamWrite(attr, ut.bytes, userExpr, io)
+        }
       case ut: CalcUserTypeFromBytes =>
         val userExpr = nonOwningPointer(expr, ut)
         attrAssertUserTypePresent(attr, attr.id, userExpr)
-        val (subIo, sizeExpr) = prepareUserTypeFromBytesIO(attr, ut.bytes)
-        outSrc.puts(s"$userExpr->_set_io($subIo);")
-        outSrc.puts(s"$userExpr->_write();")
-        assertRawSubstreamSize(attr, subIo, sizeExpr)
-        outSrc.puts(s"${privateMemberName(RawIdentifier(attr.id))} = $subIo->to_byte_array();")
-        outSrc.puts(s"${io}->write_bytes(${privateMemberName(RawIdentifier(attr.id))});")
+        if (attr.cond.repeat == NoRepeat) {
+          val (subIo, sizeExpr) = prepareUserTypeFromBytesIO(attr, ut.bytes)
+          outSrc.puts(s"$userExpr->_set_io($subIo);")
+          outSrc.puts(s"$userExpr->_write();")
+          assertRawSubstreamSize(attr, subIo, sizeExpr)
+          outSrc.puts(s"${privateMemberName(RawIdentifier(attr.id))} = $subIo->to_byte_array();")
+          outSrc.puts(s"${io}->write_bytes(${privateMemberName(RawIdentifier(attr.id))});")
+        } else {
+          emitRepeatedRawSubstreamWrite(attr, ut.bytes, userExpr, io)
+        }
       case ut: UserType =>
         val userExpr = nonOwningPointer(expr, ut)
         attrAssertUserTypePresent(attr, attr.id, userExpr)
@@ -841,15 +884,23 @@ class CppCompiler(
       case ut: UserTypeFromBytes =>
         val userExpr = nonOwningPointer(expr, ut)
         attrAssertExprPresent(attr, userExpr, "nested object is not set")
-        val (subIo, _) = prepareUserTypeFromBytesIO(attr, ut.bytes)
-        outSrc.puts(s"$userExpr->_set_io($subIo);")
-        outSrc.puts(s"$userExpr->_check();")
+        if (attr.cond.repeat == NoRepeat) {
+          val (subIo, _) = prepareUserTypeFromBytesIO(attr, ut.bytes)
+          outSrc.puts(s"$userExpr->_set_io($subIo);")
+          outSrc.puts(s"$userExpr->_check();")
+        } else {
+          emitRepeatedRawSubstreamCheck(attr, ut.bytes, userExpr)
+        }
       case ut: CalcUserTypeFromBytes =>
         val userExpr = nonOwningPointer(expr, ut)
         attrAssertExprPresent(attr, userExpr, "nested object is not set")
-        val (subIo, _) = prepareUserTypeFromBytesIO(attr, ut.bytes)
-        outSrc.puts(s"$userExpr->_set_io($subIo);")
-        outSrc.puts(s"$userExpr->_check();")
+        if (attr.cond.repeat == NoRepeat) {
+          val (subIo, _) = prepareUserTypeFromBytesIO(attr, ut.bytes)
+          outSrc.puts(s"$userExpr->_set_io($subIo);")
+          outSrc.puts(s"$userExpr->_check();")
+        } else {
+          emitRepeatedRawSubstreamCheck(attr, ut.bytes, userExpr)
+        }
       case ut: UserType =>
         val userExpr = nonOwningPointer(expr, ut)
         attrAssertExprPresent(attr, userExpr, "nested object is not set")

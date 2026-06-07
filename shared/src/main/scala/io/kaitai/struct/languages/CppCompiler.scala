@@ -401,8 +401,26 @@ class CppCompiler(
   }
 
   override def attrInvokeFetchInstances(baseExpr: Ast.expr, exprType: DataType, dataType: DataType): Unit = {
-    val expr = nonOwningPointer(expression(baseExpr), dataType)
-    outSrc.puts(s"$expr->_fetch_instances();")
+    val base = expression(baseExpr)
+    if (exprType.asCombined != dataType) {
+      importListSrc.addSystem("stdexcept")
+      val castType = kaitaiType2NativeType(dataType.asNonOwning())
+      val expr = nonOwningPointer(base, exprType)
+      outSrc.puts("{")
+      outSrc.inc
+      outSrc.puts(s"$castType _switch_obj = dynamic_cast<$castType>($expr);")
+      outSrc.puts(s"if (_switch_obj == $nullPtr) {")
+      outSrc.inc
+      outSrc.puts("""throw std::runtime_error("switch object type mismatch in _fetch_instances");""")
+      outSrc.dec
+      outSrc.puts("}")
+      outSrc.puts("_switch_obj->_fetch_instances();")
+      outSrc.dec
+      outSrc.puts("}")
+    } else {
+      val expr = nonOwningPointer(base, dataType)
+      outSrc.puts(s"$expr->_fetch_instances();")
+    }
   }
 
   override def attrInvokeInstance(instName: InstanceIdentifier): Unit =
@@ -715,11 +733,12 @@ class CppCompiler(
 
   private def emitCheckRepeatLoop(attr: AttrLikeSpec, id: Identifier)(extraBody: => Unit): Unit = {
     val vecType = s"std::vector<${kaitaiType2NativeType(attr.dataType)}>"
+    val itemExpr = "(*it)"
     outSrc.puts(s"for ($vecType::const_iterator it = ${privateMemberName(id)}->begin(); it != ${privateMemberName(id)}->end(); ++it) {")
     outSrc.inc
     outSrc.puts(s"const std::size_t i = static_cast<std::size_t>(it - ${privateMemberName(id)}->begin());")
-    outSrc.puts(s"const ${kaitaiType2NativeType(attr.dataType.asNonOwning())} ${translator.doName(Identifier.ITERATOR)} = (*it);")
-    emitCheckExpr(attr, attr.dataType, "(*it)", normalIO)
+    outSrc.puts(s"const ${kaitaiType2NativeType(attr.dataType.asNonOwning())} ${translator.doName(Identifier.ITERATOR)} = ${nonOwningPointer(itemExpr, attr.dataType)};")
+    emitCheckExpr(attr, attr.dataType, itemExpr, normalIO)
     extraBody
     outSrc.dec
     outSrc.puts("}")
@@ -824,6 +843,60 @@ class CppCompiler(
     outSrc.puts("}")
   }
 
+  private def emitSwitchCaseExpr(
+    attr: AttrLikeSpec,
+    caseType: DataType,
+    assignType: DataType,
+    expr: String,
+    fixedEndian: Option[FixedEndian],
+    io: String,
+    emitLeaf: (String, DataType) => Unit
+  ): Unit = {
+    caseType match {
+      case _: BytesType if switchBytesOnlyAsRaw =>
+        emitLeaf(privateMemberName(RawIdentifier(attr.id)), caseType)
+      case _: UserType | _: UserTypeFromBytes | _: CalcUserTypeFromBytes if assignType.asCombined != caseType =>
+        importListSrc.addSystem("stdexcept")
+        val castType = kaitaiType2NativeType(caseType.asNonOwning())
+        val switchExpr = nonOwningPointer(expr, assignType)
+        outSrc.puts("{")
+        outSrc.inc
+        outSrc.puts(s"$castType _switch_obj = dynamic_cast<$castType>($switchExpr);")
+        outSrc.puts(s"if (_switch_obj == $nullPtr) {")
+        outSrc.inc
+        outSrc.puts(s"""throw std::runtime_error("${attr.path.mkString("/", "/", "")}: switch object type mismatch");""")
+        outSrc.dec
+        outSrc.puts("}")
+        emitLeaf("_switch_obj", caseType.asNonOwning())
+        outSrc.dec
+        outSrc.puts("}")
+      case _ =>
+        emitLeaf(expr, caseType)
+    }
+  }
+
+  private def emitSwitchWrite(attr: AttrLikeSpec, st: SwitchType, expr: String, fixedEndian: Option[FixedEndian], io: String): Unit = {
+    switchCases[DataType](attr.id, st.on, st.cases,
+      (caseType) => emitSwitchCaseExpr(attr, caseType, st.combinedType, expr, fixedEndian, io,
+        (caseExpr, concreteType) => emitWriteExpr(attr, concreteType, caseExpr, fixedEndian, io)
+      ),
+      (caseType) => emitSwitchCaseExpr(attr, caseType, st.combinedType, expr, fixedEndian, io,
+        (caseExpr, concreteType) => emitWriteExpr(attr, concreteType, caseExpr, fixedEndian, io)
+      )
+    )
+  }
+
+  private def emitSwitchCheck(attr: AttrLikeSpec, st: SwitchType, expr: String, io: String): Unit = {
+    switchCases[DataType](attr.id, st.on, st.cases,
+      (caseType) => emitSwitchCaseExpr(attr, caseType, st.combinedType, expr, None, io,
+        (caseExpr, concreteType) => emitCheckExpr(attr, concreteType, caseExpr, io)
+      ),
+      (caseType) => emitSwitchCaseExpr(attr, caseType, st.combinedType, expr, None, io,
+        (caseExpr, concreteType) => emitCheckExpr(attr, concreteType, caseExpr, io)
+      )
+    )
+  }
+
   private def emitWriteExpr(attr: AttrLikeSpec, dataType: DataType, expr: String, fixedEndian: Option[FixedEndian], io: String): Unit = {
     dataType match {
       case rt: ReadableType =>
@@ -874,6 +947,8 @@ class CppCompiler(
         attrAssertUserTypePresent(attr, attr.id, userExpr)
         outSrc.puts(s"$userExpr->_set_io(${io});")
         outSrc.puts(s"$userExpr->_write();")
+      case st: SwitchType =>
+        emitSwitchWrite(attr, st, expr, fixedEndian, io)
       case _ =>
         throw new NotImplementedError(s"C++ read-write prototype does not support field type `${dataType}` yet: ${attr.path.mkString("/")}")
     }
@@ -906,6 +981,8 @@ class CppCompiler(
         attrAssertExprPresent(attr, userExpr, "nested object is not set")
         outSrc.puts(s"$userExpr->_set_io(${io});")
         outSrc.puts(s"$userExpr->_check();")
+      case st: SwitchType =>
+        emitSwitchCheck(attr, st, expr, io)
       case bt: BytesLimitType =>
         attrCheckFixedSizeExpr(attr, expr, bt.size)
       case st: StrFromBytesType =>
@@ -1243,6 +1320,7 @@ class CppCompiler(
   }
 
   private val ReStdUniquePtr = "^std::unique_ptr<(.*?)>\\((.*?)\\)$".r
+  private val ReLocalIdentifier = "^[A-Za-z_][A-Za-z0-9_]*$".r
 
   override def handleAssignmentRepeatUntil(id: Identifier, expr: String, isRaw: Boolean): Unit = {
     val (typeDecl, tempVar) = if (isRaw) {
@@ -1255,6 +1333,8 @@ class CppCompiler(
       expr match {
         case ReStdUniquePtr(cppClass, innerExpr) =>
           (s"std::move(std::unique_ptr<$cppClass>($tempVar))", innerExpr)
+        case ReLocalIdentifier() if !isRaw =>
+          (s"std::move($expr)", s"$expr.get()")
         case _ =>
           (tempVar, expr)
       }

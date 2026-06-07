@@ -8,6 +8,8 @@ import io.kaitai.struct.precompile.{EnumNotFoundError, FieldNotFoundError, TypeN
 import io.kaitai.struct.translators.TypeProvider
 
 class ClassTypeProvider(classSpecs: ClassSpecs, var topClass: ClassSpec) extends TypeProvider {
+  private val IsNullPrefix = "_is_null_"
+
   var nowClass = topClass
   val allClasses: ClassSpecs = classSpecs
 
@@ -43,7 +45,10 @@ class ClassTypeProvider(classSpecs: ClassSpecs, var topClass: ClassSpec) extends
       case Identifier.SIZEOF =>
         CalcIntType
       case _ =>
-        resolveMember(inClass, attrName).dataTypeComposite
+        resolveNullableMember(inClass, attrName) match {
+          case Some(_) => CalcBooleanType
+          case None => resolveMember(inClass, attrName).dataTypeComposite
+        }
     }
   }
 
@@ -117,6 +122,23 @@ class ClassTypeProvider(classSpecs: ClassSpecs, var topClass: ClassSpec) extends
     throw new FieldNotFoundError(attrName, inClass)
   }
 
+  def resolveNullableMember(inClass: ClassSpec, attrName: String): Option[MemberSpec] = {
+    if (!attrName.startsWith(IsNullPrefix))
+      return None
+
+    val baseName = attrName.stripPrefix(IsNullPrefix)
+    val memberOpt =
+      inClass.seq.find(_.id == NamedIdentifier(baseName))
+        .orElse(inClass.instances.get(InstanceIdentifier(baseName)))
+
+    memberOpt match {
+      case Some(member) if member.isNullable =>
+        Some(member)
+      case _ =>
+        None
+    }
+  }
+
   override def resolveEnum(inType: Ast.typeId, enumName: String): EnumSpec =
     resolveEnum(resolveClassSpec(inType), enumName)
 
@@ -180,6 +202,9 @@ class ClassTypeProvider(classSpecs: ClassSpecs, var topClass: ClassSpec) extends
   override def isLazy(attrName: String): Boolean = isLazy(nowClass, attrName)
 
   def isLazy(inClass: ClassSpec, attrName: String): Boolean = {
+    if (resolveNullableMember(inClass, attrName).isDefined)
+      return false
+
     inClass.seq.foreach { el =>
       if (el.id == NamedIdentifier(attrName))
         return false

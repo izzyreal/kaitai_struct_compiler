@@ -358,8 +358,31 @@ class CppCompiler(
     ensureMode(PublicAccess)
     val setDirty = if (isStreamType(attrType)) "" else "m__dirty = true; "
     val clearNull = if (isNullable && !needsDestruction(attrType)) s"${nullFlagForName(attrName)} = false; " else ""
-    outHdr.puts(s"void set_${idToStr(attrName)}(${kaitaiType2NativeType(attrType)} _v) { $setDirty$clearNull${privateMemberName(attrName)} = ${stdMoveWrap("_v")}; }")
+    val invalidateValueInstances = typeProvider.nowClass.instances.collect {
+      case (instName, _: ValueInstanceSpec) => s"${calculatedFlagForName(instName)} = false; "
+    }.mkString
+    val disableParseInstanceWriteback = attrName match {
+      case instName: InstanceIdentifier =>
+        typeProvider.nowClass.instances.get(instName) match {
+          case Some(pi: ParseInstanceSpec) if isCurrentStreamLookaheadInstance(pi) =>
+            s"${enabledFlagForName(instName)} = false; "
+          case _ =>
+            ""
+        }
+      case _ =>
+        ""
+    }
+    val cacheInstance = attrName match {
+      case instName: InstanceIdentifier if typeProvider.nowClass.instances.contains(instName) =>
+        s"${calculatedFlagForName(instName)} = true; "
+      case _ =>
+        ""
+    }
+    outHdr.puts(s"void set_${idToStr(attrName)}(${kaitaiType2NativeType(attrType)} _v) { $setDirty$clearNull$invalidateValueInstances$disableParseInstanceWriteback$cacheInstance${privateMemberName(attrName)} = ${stdMoveWrap("_v")}; }")
   }
+
+  private def isCurrentStreamLookaheadInstance(instSpec: ParseInstanceSpec): Boolean =
+    instSpec.io.isEmpty && instSpec.pos.contains(Ast.expr.Attribute(Ast.expr.Name(Ast.identifier("_io")), Ast.identifier("pos")))
 
   override def writeHeader(endian: Option[FixedEndian], isEmpty: Boolean): Unit = {
     writeFooterNeedsFetchInstances = endian.isEmpty
@@ -1653,6 +1676,11 @@ class CppCompiler(
       valExpr
     }
     handleAssignmentSimple(instName, valExprConverted)
+  }
+
+  override def instanceInvalidate(instName: InstanceIdentifier): Unit = {
+    ensureMode(PublicAccess)
+    outHdr.puts(s"void _invalidate_${idToStr(instName)}() { ${calculatedFlagForName(instName)} = false; }")
   }
 
   override def enumDeclaration(curClass: List[String], enumName: String, enumColl: Seq[(BigInt, EnumValueSpec)]): Unit = {

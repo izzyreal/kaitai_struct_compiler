@@ -1574,7 +1574,7 @@ class CppCompiler(
   override def instanceDeclaration(attrName: InstanceIdentifier, attrType: DataType, isNullable: Boolean): Unit = {
     ensureMode(PrivateAccess)
     outHdr.puts(s"bool ${calculatedFlagForName(attrName)};")
-    outHdr.puts(s"${kaitaiType2NativeType(attrType)} ${privateMemberName(attrName)};")
+    outHdr.puts(s"${kaitaiType2NativeType(attrType, true)} ${privateMemberName(attrName)};")
     declareNullFlag(attrName, attrType, isNullable)
   }
 
@@ -1602,7 +1602,7 @@ class CppCompiler(
 
   override def instanceHeader(className: List[String], instName: InstanceIdentifier, dataType: DataType, isNullable: Boolean): Unit = {
     ensureMode(PublicAccess)
-    outHdr.puts(s"${kaitaiType2NativeType(dataType.asNonOwning())} ${publicMemberName(instName)}();")
+    outHdr.puts(s"${kaitaiType2NativeType(dataType.asNonOwning(), true)} ${publicMemberName(instName)}();")
 
     outSrc.puts
     outSrc.puts(s"${kaitaiType2NativeType(dataType.asNonOwning(), true)} ${types2class(className)}::${publicMemberName(instName)}() {")

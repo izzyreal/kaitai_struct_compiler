@@ -942,6 +942,13 @@ class CppCompiler(
         }
       case _: BytesType =>
         outSrc.puts(s"${io}->write_bytes($expr);")
+      case st: StrFromBytesType =>
+        st.bytes match {
+          case bt: BytesLimitType =>
+            emitStringBytesLimitWrite(attr, expr, bt, io)
+          case _ =>
+            outSrc.puts(s"${io}->write_bytes($expr);")
+        }
       case _: StrType =>
         outSrc.puts(s"${io}->write_bytes($expr);")
       case ut: UserTypeFromBytes =>
@@ -1016,10 +1023,74 @@ class CppCompiler(
       case st: StrFromBytesType =>
         st.bytes match {
           case bt: BytesLimitType =>
-            attrCheckFixedSizeExpr(attr, expr, bt.size)
+            emitStringBytesLimitCheck(attr, expr, bt)
           case _ =>
         }
       case _ =>
+    }
+  }
+
+  private def emitStringBytesLimitWrite(attr: AttrLikeSpec, expr: String, bt: BytesLimitType, io: String): Unit = {
+    val term = bt.terminator.map { terminator =>
+      if (terminator.length == 1) {
+        terminator.head & 0xff
+      } else {
+        throw new NotImplementedError(s"C++ read-write prototype does not support multibyte string terminators yet: ${attr.path.mkString("/")}")
+      }
+    }
+
+    if (bt.terminator.isEmpty && bt.padRight.isEmpty) {
+      outSrc.puts(s"${io}->write_bytes($expr);")
+      return
+    }
+
+    val sizeExpr = expression(bt.size)
+    val bufName = s"_buf${privateMemberName(attr.id)}"
+    val padByte = bt.padRight.orElse(term.map(_ => 0)).getOrElse(0)
+    outSrc.puts(s"std::string $bufName = $expr;")
+    term.foreach { t =>
+      if (!bt.include) {
+        outSrc.puts(s"if ($bufName.size() < static_cast<std::string::size_type>($sizeExpr)) {")
+        outSrc.inc
+        outSrc.puts(s"""$bufName += std::string(1, static_cast<char>($t));""")
+        outSrc.dec
+        outSrc.puts("}")
+      }
+    }
+    outSrc.puts(s"if ($bufName.size() < static_cast<std::string::size_type>($sizeExpr)) {")
+    outSrc.inc
+    outSrc.puts(s"$bufName.append(static_cast<std::string::size_type>($sizeExpr) - $bufName.size(), static_cast<char>($padByte));")
+    outSrc.dec
+    outSrc.puts("}")
+    outSrc.puts(s"${io}->write_bytes($bufName);")
+  }
+
+  private def emitStringBytesLimitCheck(attr: AttrLikeSpec, expr: String, bt: BytesLimitType): Unit = {
+    importListSrc.addSystem("stdexcept")
+    val sizeExpr = expression(bt.size)
+    if (bt.terminator.isEmpty && bt.padRight.isEmpty) {
+      attrCheckFixedSizeExpr(attr, expr, bt.size)
+      return
+    }
+
+    outSrc.puts(s"if ($expr.size() > static_cast<std::string::size_type>($sizeExpr)) {")
+    outSrc.inc
+    outSrc.puts(s"""throw std::runtime_error("${attr.path.mkString("/", "/", "")}: size mismatch");""")
+    outSrc.dec
+    outSrc.puts("}")
+
+    bt.terminator.foreach { terminator =>
+      if (terminator.length != 1) {
+        throw new NotImplementedError(s"C++ read-write prototype does not support multibyte string terminators yet: ${attr.path.mkString("/")}")
+      }
+      if (!bt.include) {
+        val term = terminator.head & 0xff
+        outSrc.puts(s"if ($expr.find(static_cast<char>($term)) != std::string::npos) {")
+        outSrc.inc
+        outSrc.puts(s"""throw std::runtime_error("${attr.path.mkString("/", "/", "")}: terminator must not appear in value");""")
+        outSrc.dec
+        outSrc.puts("}")
+      }
     }
   }
 

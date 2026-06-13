@@ -176,8 +176,12 @@ class CppTranslator(provider: TypeProvider, importListSrc: CppImportList, import
     s"${translate(container)}->at(${translate(idx)})"
   override def doIfExp(condition: expr, ifTrue: expr, ifFalse: expr): String =
     s"((${translate(condition)}) ? (${translate(ifTrue)}) : (${translate(ifFalse)}))"
-  override def doCast(value: Ast.expr, typeName: DataType): String =
-    s"static_cast<${CppCompiler.kaitaiType2NativeType(config.cppConfig, importListHdr, typeName)}>(${translate(value)})"
+  override def doCast(value: Ast.expr, typeName: DataType): String = typeName match {
+    case _: StrType =>
+      s"${CppCompiler.kstreamName}::to_string(${translate(value)})"
+    case _ =>
+      s"static_cast<${CppCompiler.kaitaiType2NativeType(config.cppConfig, importListHdr, typeName)}>(${translate(value)})"
+  }
 
   // Predefined methods of various types
   override def strToInt(s: expr, base: expr): String = {

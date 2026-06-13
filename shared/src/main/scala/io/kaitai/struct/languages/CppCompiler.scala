@@ -1756,7 +1756,11 @@ class CppCompiler(
 
   override def instanceWriteFlagInit(attrName: InstanceIdentifier): Unit = {
     outSrc.puts(s"${writeFlagForName(attrName)} = false;")
-    outSrc.puts(s"${enabledFlagForName(attrName)} = true;")
+    val enabledByDefault = typeProvider.nowClass.instances.get(attrName) match {
+      case Some(pi: ParseInstanceSpec) if isCurrentStreamLookaheadInstance(pi) => "false"
+      case _ => "true"
+    }
+    outSrc.puts(s"${enabledFlagForName(attrName)} = $enabledByDefault;")
   }
 
   override def instanceSetWriteFlag(instName: InstanceIdentifier): Unit =

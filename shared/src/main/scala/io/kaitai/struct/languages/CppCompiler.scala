@@ -506,21 +506,48 @@ class CppCompiler(
 
     attr.cond.repeat match {
       case RepeatExpr(repeatExpr) =>
-        attrWriteRepeatExpr(attr, id, repeatExpr, defEndian)
+        attr.cond.ifExpr match {
+          case Some(ifExpr) =>
+            outSrc.puts(s"if (${expression(ifExpr)}) {")
+            outSrc.inc
+            attrWriteRepeatExpr(attr, id, repeatExpr, defEndian)
+            outSrc.dec
+            outSrc.puts("}")
+          case None =>
+            attrWriteRepeatExpr(attr, id, repeatExpr, defEndian)
+        }
         attr match {
           case pis: ParseInstanceSpec if pis.pos.isDefined => popPos(io)
           case _ =>
         }
         return
       case repUntil: RepeatUntil =>
-        attrWriteRepeatUntil(attr, id, repUntil, defEndian)
+        attr.cond.ifExpr match {
+          case Some(ifExpr) =>
+            outSrc.puts(s"if (${expression(ifExpr)}) {")
+            outSrc.inc
+            attrWriteRepeatUntil(attr, id, repUntil, defEndian)
+            outSrc.dec
+            outSrc.puts("}")
+          case None =>
+            attrWriteRepeatUntil(attr, id, repUntil, defEndian)
+        }
         attr match {
           case pis: ParseInstanceSpec if pis.pos.isDefined => popPos(io)
           case _ =>
         }
         return
       case RepeatEos =>
-        attrWriteRepeatEos(attr, id, defEndian)
+        attr.cond.ifExpr match {
+          case Some(ifExpr) =>
+            outSrc.puts(s"if (${expression(ifExpr)}) {")
+            outSrc.inc
+            attrWriteRepeatEos(attr, id, defEndian)
+            outSrc.dec
+            outSrc.puts("}")
+          case None =>
+            attrWriteRepeatEos(attr, id, defEndian)
+        }
         attr match {
           case pis: ParseInstanceSpec if pis.pos.isDefined => popPos(io)
           case _ =>
@@ -561,20 +588,92 @@ class CppCompiler(
 
     attr.cond.repeat match {
       case RepeatExpr(repeatExpr) =>
-        attrCheckRepeatExpr(attr, id, repeatExpr)
+        attr.cond.ifExpr match {
+          case Some(ifExpr) =>
+            val isSetExpr = attrIsSetExpr(attr, id)
+            importListSrc.addSystem("stdexcept")
+            outSrc.puts(s"if (${expression(ifExpr)}) {")
+            outSrc.inc
+            outSrc.puts(s"if (!($isSetExpr)) {")
+            outSrc.inc
+            outSrc.puts(s"""throw std::runtime_error("${attr.path.mkString("/", "/", "")}: conditional field is not set");""")
+            outSrc.dec
+            outSrc.puts("}")
+            attrCheckRepeatExpr(attr, id, repeatExpr)
+            outSrc.dec
+            outSrc.puts("} else {")
+            outSrc.inc
+            outSrc.puts(s"if ($isSetExpr) {")
+            outSrc.inc
+            outSrc.puts(s"""throw std::runtime_error("${attr.path.mkString("/", "/", "")}: conditional field should be absent");""")
+            outSrc.dec
+            outSrc.puts("}")
+            outSrc.dec
+            outSrc.puts("}")
+          case None =>
+            attrCheckRepeatExpr(attr, id, repeatExpr)
+        }
         return
       case repUntil: RepeatUntil =>
-        attrCheckRepeatUntil(attr, id, repUntil)
+        attr.cond.ifExpr match {
+          case Some(ifExpr) =>
+            val isSetExpr = attrIsSetExpr(attr, id)
+            importListSrc.addSystem("stdexcept")
+            outSrc.puts(s"if (${expression(ifExpr)}) {")
+            outSrc.inc
+            outSrc.puts(s"if (!($isSetExpr)) {")
+            outSrc.inc
+            outSrc.puts(s"""throw std::runtime_error("${attr.path.mkString("/", "/", "")}: conditional field is not set");""")
+            outSrc.dec
+            outSrc.puts("}")
+            attrCheckRepeatUntil(attr, id, repUntil)
+            outSrc.dec
+            outSrc.puts("} else {")
+            outSrc.inc
+            outSrc.puts(s"if ($isSetExpr) {")
+            outSrc.inc
+            outSrc.puts(s"""throw std::runtime_error("${attr.path.mkString("/", "/", "")}: conditional field should be absent");""")
+            outSrc.dec
+            outSrc.puts("}")
+            outSrc.dec
+            outSrc.puts("}")
+          case None =>
+            attrCheckRepeatUntil(attr, id, repUntil)
+        }
         return
       case RepeatEos =>
-        attrCheckRepeatEos(attr, id)
+        attr.cond.ifExpr match {
+          case Some(ifExpr) =>
+            val isSetExpr = attrIsSetExpr(attr, id)
+            importListSrc.addSystem("stdexcept")
+            outSrc.puts(s"if (${expression(ifExpr)}) {")
+            outSrc.inc
+            outSrc.puts(s"if (!($isSetExpr)) {")
+            outSrc.inc
+            outSrc.puts(s"""throw std::runtime_error("${attr.path.mkString("/", "/", "")}: conditional field is not set");""")
+            outSrc.dec
+            outSrc.puts("}")
+            attrCheckRepeatEos(attr, id)
+            outSrc.dec
+            outSrc.puts("} else {")
+            outSrc.inc
+            outSrc.puts(s"if ($isSetExpr) {")
+            outSrc.inc
+            outSrc.puts(s"""throw std::runtime_error("${attr.path.mkString("/", "/", "")}: conditional field should be absent");""")
+            outSrc.dec
+            outSrc.puts("}")
+            outSrc.dec
+            outSrc.puts("}")
+          case None =>
+            attrCheckRepeatEos(attr, id)
+        }
         return
       case NoRepeat =>
     }
 
     attr.cond.ifExpr match {
       case Some(ifExpr) =>
-        val isSetExpr = attrIsSetExpr(id, attr.dataType)
+        val isSetExpr = attrIsSetExpr(attr, id)
         importListSrc.addSystem("stdexcept")
         outSrc.puts(s"if (${expression(ifExpr)}) {")
         outSrc.inc
@@ -1094,9 +1193,9 @@ class CppCompiler(
     }
   }
 
-  private def attrIsSetExpr(id: Identifier, dataType: DataType): String =
-    if (needsDestruction(dataType)) {
-      s"${nonOwningPointer(privateMemberName(id), dataType)} != $nullPtr"
+  private def attrIsSetExpr(attr: AttrLikeSpec, id: Identifier): String =
+    if (attr.cond.repeat != NoRepeat || needsDestruction(attr.dataType)) {
+      s"${nonOwningPointer(privateMemberName(id), attr.dataType)} != $nullPtr"
     } else {
       s"!${nullFlagForName(id)}"
     }

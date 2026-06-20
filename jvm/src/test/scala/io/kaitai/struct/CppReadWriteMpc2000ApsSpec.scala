@@ -31,7 +31,7 @@ class CppReadWriteMpc2000ApsSpec extends AnyFunSuite with Matchers with CppReadW
     header should include ("#include \"mpc2000pgm_write.h\"")
     header should include ("void set_global_parameters(std::unique_ptr<global_parameters_t> _v)")
     header should include ("void set_aps_programs(std::unique_ptr<std::vector<std::unique_ptr<aps_program_meta_t>>> _v)")
-    source should include ("m__io->write_bits_int_be(1, static_cast<uint64_t>(m_pad_to_internal_sound));")
+    source should include ("m__io->write_bits_int_le(1, static_cast<uint64_t>(m_pad_to_internal_sound));")
     source should include ("m_drum1.get()->_write();")
     source should include ("(*it).get()->_write();")
   }

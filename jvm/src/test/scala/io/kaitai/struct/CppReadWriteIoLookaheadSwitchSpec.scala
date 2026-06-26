@@ -29,6 +29,8 @@ class CppReadWriteIoLookaheadSwitchSpec extends AnyFunSuite with Matchers with C
     val source = files("io_lookahead_switch_write.cpp")
 
     header should include ("void set_status_byte_lookahead(uint8_t _v) { m__dirty = true; f_actual_kind = false; f_using_prev = false; e_status_byte_lookahead = false; f_status_byte_lookahead = true;")
+    source should include ("e_status_byte_lookahead = m__io != nullptr;")
+    source should include ("w_status_byte_lookahead = false;")
     source should include ("if (!(using_prev())) {")
     source should include ("switch (actual_kind()) {")
     source should include ("dynamic_cast<body_one_t*>(m_body.get())")

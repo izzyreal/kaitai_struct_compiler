@@ -1590,7 +1590,20 @@ class CppCompiler(
       case BitsType(width: Int, bitEndian) =>
         s"$io->read_bits_int_${bitEndian.toSuffix}($width)"
       case t: UserType =>
-        val addParams = Utils.join(t.args.map((a) => translator.translate(a)), "", ", ", ", ")
+        val addParams = Utils.join(t.args.zip(t.classSpec.get.params).map { case (argExpr, paramSpec) =>
+          val translated = translator.translate(argExpr)
+          val argType = translator.detectType(argExpr)
+          (argExpr, argType, paramSpec.dataType, config.cppConfig.pointers) match {
+            case (_: Ast.expr.List, ctArg: ComplexDataType, ctParam: ComplexDataType, UniqueAndRawPointers)
+              if ctArg.isOwning && !ctParam.isOwning =>
+              s"${translated}.release()"
+            case (Ast.expr.CastToType(_: Ast.expr.List, _), ctArg: ComplexDataType, ctParam: ComplexDataType, UniqueAndRawPointers)
+              if ctArg.isOwning && !ctParam.isOwning =>
+              s"${translated}.release()"
+            case _ =>
+              translated
+          }
+        }, "", ", ", ", ")
         val addArgs = if (t.isExternal(typeProvider.nowClass)) {
           ""
         } else {
@@ -2010,7 +2023,28 @@ class CppCompiler(
   override def type2class(className: String): String = CppCompiler.type2class(className)
 
   def kaitaiType2NativeType(attrType: DataType, absolute: Boolean = false): String =
-    CppCompiler.kaitaiType2NativeType(config.cppConfig, importListHdr, attrType, absolute)
+    {
+      addExternalTypeIncludes(attrType)
+      CppCompiler.kaitaiType2NativeType(config.cppConfig, importListHdr, attrType, absolute)
+    }
+
+  private def addExternalTypeIncludes(attrType: DataType): Unit = {
+    attrType match {
+      case t: UserType =>
+        if (t.classSpec.nonEmpty && t.isExternal(typeProvider.nowClass)) {
+          importListHdr.addLocal(outFileNameHeader(t.classSpec.get.name.head))
+        }
+      case t: EnumType =>
+        if (t.enumSpec.nonEmpty && t.enumSpec.get.isExternal(typeProvider.nowClass)) {
+          importListHdr.addLocal(outFileNameHeader(t.enumSpec.get.name.head))
+        }
+      case at: ArrayType =>
+        addExternalTypeIncludes(at.elType)
+      case st: SwitchType =>
+        st.cases.values.foreach(addExternalTypeIncludes)
+      case _ =>
+    }
+  }
 
   def nullPtr: String = config.cppConfig.pointers match {
     case RawPointers => "0"
@@ -2185,7 +2219,18 @@ object CppCompiler extends LanguageCompilerStatic
 
       case at: ArrayType => {
         importListHdr.addSystem("vector")
-        val vecType = s"std::vector<${kaitaiType2NativeType(config, importListHdr, at.elType, absolute)}>"
+        val cppElType = (at, at.elType, config.pointers) match {
+          case (_: CalcArrayType, t: UserType, UniqueAndRawPointers) if !t.isOwning =>
+            val typeStr = types2class(if (absolute) {
+              t.classSpec.get.name
+            } else {
+              t.name
+            })
+            s"std::unique_ptr<$typeStr>"
+          case _ =>
+            kaitaiType2NativeType(config, importListHdr, at.elType, absolute)
+        }
+        val vecType = s"std::vector<$cppElType>"
         (at, config.pointers) match {
           case (_: ArrayTypeInStream, UniqueAndRawPointers) =>
             s"std::unique_ptr<$vecType>"

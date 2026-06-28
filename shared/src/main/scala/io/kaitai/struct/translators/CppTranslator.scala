@@ -174,11 +174,24 @@ class CppTranslator(provider: TypeProvider, importListSrc: CppImportList, import
 
   override def arraySubscript(container: expr, idx: expr): String =
     s"${translate(container)}->at(${translate(idx)})"
-  override def doIfExp(condition: expr, ifTrue: expr, ifFalse: expr): String =
-    s"((${translate(condition)}) ? (${translate(ifTrue)}) : (${translate(ifFalse)}))"
+  override def doIfExp(condition: expr, ifTrue: expr, ifFalse: expr): String = {
+    val ifTrueStr = translate(ifTrue)
+    val ifFalseStr = translate(ifFalse)
+    (detectType(ifTrue), detectType(ifFalse)) match {
+      case (lhs: UserType, rhs: UserType) if lhs != rhs =>
+        s"((${translate(condition)}) ? (static_cast<kaitai::kstruct*>($ifTrueStr)) : (static_cast<kaitai::kstruct*>($ifFalseStr)))"
+      case _ =>
+        s"((${translate(condition)}) ? ($ifTrueStr) : ($ifFalseStr))"
+    }
+  }
   override def doCast(value: Ast.expr, typeName: DataType): String = typeName match {
     case _: StrType =>
       s"${CppCompiler.kstreamName}::to_string(${translate(value)})"
+    case t: UserType =>
+      if (t.classSpec.nonEmpty && t.isExternal(provider.nowClass)) {
+        importListSrc.addLocal(CppCompiler.outFileNameHeader(t.classSpec.get.name.head))
+      }
+      s"static_cast<${CppCompiler.kaitaiType2NativeType(config.cppConfig, importListHdr, typeName)}>(${translate(value)})"
     case _ =>
       s"static_cast<${CppCompiler.kaitaiType2NativeType(config.cppConfig, importListHdr, typeName)}>(${translate(value)})"
   }

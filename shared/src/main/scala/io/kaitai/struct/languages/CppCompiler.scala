@@ -351,7 +351,13 @@ class CppCompiler(
   override def attributeReader(attrName: Identifier, attrType: DataType, isNullable: Boolean): Unit = {
     ensureMode(PublicAccess)
     val ret = nonOwningPointer(privateMemberName(attrName), attrType)
-    outHdr.puts(s"${kaitaiType2NativeType(attrType.asNonOwning())} ${publicMemberName(attrName)}() const { return $ret; }")
+    val readerType =
+      if (attrName == ParentIdentifier) {
+        s"$kstructName*"
+      } else {
+        kaitaiType2NativeType(attrType.asNonOwning())
+      }
+    outHdr.puts(s"$readerType ${publicMemberName(attrName)}() const { return $ret; }")
   }
 
   override def attributeSetter(attrName: Identifier, attrType: DataType, isNullable: Boolean): Unit = {
@@ -1642,14 +1648,14 @@ class CppCompiler(
 
   override def bytesPadTermExpr(expr0: String, padRight: Option[Int], terminator: Option[Seq[Byte]], include: Boolean) = {
     val expr1 = padRight match {
-      case Some(padByte) => s"$kstreamName::bytes_strip_right($expr0, $padByte)"
+      case Some(padByte) => s"$kstreamName::bytes_strip_right($expr0, static_cast<char>($padByte))"
       case None => expr0
     }
     val expr2 = terminator match {
       case Some(term) =>
         if (term.length == 1) {
           val t = term.head & 0xff
-          s"$kstreamName::bytes_terminate($expr1, $t, $include)"
+          s"$kstreamName::bytes_terminate($expr1, static_cast<char>($t), $include)"
         } else {
           s"$kstreamName::bytes_terminate_multi($expr1, ${translator.doByteArrayLiteral(term)}, $include)"
         }

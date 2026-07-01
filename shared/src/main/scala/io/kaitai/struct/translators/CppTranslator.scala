@@ -62,6 +62,14 @@ class CppTranslator(provider: TypeProvider, importListSrc: CppImportList, import
 
   def doRawStringLiteral(s: String): String = super.doStringLiteral(s)
 
+  override def doLocalName(s: String): String = s match {
+    case Identifier.PARENT =>
+      val parentType = provider.determineType(Identifier.PARENT)
+      s"static_cast<${CppCompiler.kaitaiType2NativeType(config.cppConfig, importListHdr, parentType.asNonOwning())}>(_parent())"
+    case _ =>
+      super.doLocalName(s)
+  }
+
   /**
     * Handles string literal for C++ by wrapping a C `const char*`-style string
     * into a std::string constructor. Note that normally std::string

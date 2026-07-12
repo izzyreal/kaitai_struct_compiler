@@ -30,9 +30,13 @@ class CppReadWriteMpc60AllSpec extends AnyFunSuite with Matchers with CppReadWri
 
     header should include ("class mpc60all_write_t")
     header should include ("void set_sequences(std::unique_ptr<std::vector<std::unique_ptr<sequence_t>>> _v)")
+    header should include ("void set_sequences_terminator(std::string _v)")
+    header should include ("void set_songs(std::unique_ptr<std::vector<std::unique_ptr<song_t>>> _v)")
     header should include ("void set_track_headers(std::unique_ptr<std::vector<std::unique_ptr<track_header_t>>> _v)")
+    header should include ("void set_steps(std::unique_ptr<std::vector<std::unique_ptr<song_step_t>>> _v)")
     source should include ("void mpc60all_write_t::_write()")
     source should include ("(*it).get()->_write();")
     source should include ("void mpc60all_write_t::event_t::_write()")
+    source should include ("void mpc60all_write_t::song_t::_write()")
   }
 }

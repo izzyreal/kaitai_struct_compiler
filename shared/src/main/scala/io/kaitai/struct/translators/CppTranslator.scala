@@ -229,19 +229,19 @@ class CppTranslator(provider: TypeProvider, importListSrc: CppImportList, import
     s"${translate(b, METHOD_PRECEDENCE)}.length()"
 
   override def bytesSubscript(container: Ast.expr, idx: Ast.expr): String =
-    s"${translate(container, METHOD_PRECEDENCE)}.at(${translate(idx)})"
+    s"static_cast<uint8_t>(${translate(container, METHOD_PRECEDENCE)}.at(${translate(idx)}))"
   override def bytesFirst(b: Ast.expr): String = {
     val bStr = translate(b, METHOD_PRECEDENCE)
     config.cppConfig.stdStringFrontBack match {
-      case true => s"$bStr.front()"
-      case false => s"$bStr.at(0)"
+      case true => s"static_cast<uint8_t>($bStr.front())"
+      case false => s"static_cast<uint8_t>($bStr.at(0))"
     }
   }
   override def bytesLast(b: Ast.expr): String = {
     val bStr = translate(b, METHOD_PRECEDENCE)
     config.cppConfig.stdStringFrontBack match {
-      case true => s"$bStr.back()"
-      case false => s"$bStr.at($bStr.length() - 1)"
+      case true => s"static_cast<uint8_t>($bStr.back())"
+      case false => s"static_cast<uint8_t>($bStr.at($bStr.length() - 1))"
     }
   }
   override def bytesMin(b: Ast.expr): String =
